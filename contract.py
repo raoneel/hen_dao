@@ -54,6 +54,8 @@ class HENDao(sp.Contract):
     def withdraw(self):
         pass
     
+    # Vote for a specific "swap" on HEN
+    # A swap is an objkt that is being sold at a specific price
     @sp.entry_point
     def vote_buy(self, params):
         sp.if ~self.data.owners.contains(sp.sender):
@@ -74,26 +76,32 @@ class HENDao(sp.Contract):
         sp.if sp.len(self.data.buyMap[params.swap_id]) == sp.len(self.data.owners):
             self.buy_nft(params.swap_id)
     
+    # Undo a vote for a swap
     @sp.entry_point
     def undo_vote_buy(self):
         pass
     
+    # Propose selling an objkt at a certain price point
     @sp.entry_point
     def propose_sell(self):
         pass
     
+    # Vote for a proposal to sell an objkt
     @sp.entry_point
     def vote_sell(self):
         pass
     
+    # Undo a vote for a proposal
     @sp.entry_point
     def undo_vote_sell(self):
         pass
     
+    # Vote to cancel an existing swap
     @sp.entry_point
     def vote_cancel_sell(self):
         pass
     
+    # Undo your vote to cancel an existing swap
     @sp.entry_point
     def undo_vote_cancel_sell(self):
         pass
