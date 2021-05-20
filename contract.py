@@ -8,7 +8,27 @@ class HENDao(sp.Contract):
     def __init__(self, initOwners):
         # Owners are locked at initialization in this iteration
         # Future iterations could have dynamic owners
-        self.init(owners = sp.set(initOwners), locked=False, equity={}, purchases=sp.set([]), buyMap={}, sellMap={})
+        self.init(owners = sp.set(initOwners), locked=False, lock_votes={}, unlock_votes={}, equity={}, purchases=sp.set([]), buyMap={}, sellMap={})
+    
+    # Vote to lock the contract
+    # Once everyone votes, then self.data.locked = True, deposits are disabled
+    @sp.entry_point
+    def vote_lock(self):
+        pass
+    
+    # Vote to unlock the contract, which allows further deposits
+    # This will allow further deposits if people want to go for another round
+    # Note that this allows dilution/rebalancing of equity of NFTs that are not yet sold
+    @sp.entry_point
+    def vote_unlock(self):
+        pass
+    
+    # Withdraw equity, regardless of state, and remove from owners.
+    # Warning, cannot be undone!
+    @sp.entry_point
+    def respectfully_leave(self):
+        pass
+    
     
     # TODO test this function
     def buy_nft(self, swap_id):
@@ -19,7 +39,10 @@ class HENDao(sp.Contract):
     @sp.entry_point
     def deposit(self):
         sp.if ~self.data.owners.contains(sp.sender):
-            sp.failwith("not an owner")
+            sp.failwith("not an owner");
+        
+        sp.if self.data.locked:
+            sp.failwith("contract locked");
         
         # Initialize equity or add to existing
         sp.if self.data.equity.contains(sp.sender):
@@ -28,9 +51,16 @@ class HENDao(sp.Contract):
             self.data.equity[sp.sender] = sp.amount
     
     @sp.entry_point
-    def propose_buy(self, params):
+    def withdraw(self):
+        pass
+    
+    @sp.entry_point
+    def vote_buy(self, params):
         sp.if ~self.data.owners.contains(sp.sender):
             sp.failwith("not an owner")
+        
+        sp.if ~self.data.locked:
+            sp.failwith("can't buy when unlocked")
         
         sp.if self.data.buyMap.contains(params.swap_id):
             self.data.buyMap[params.swap_id][sp.sender] = True
@@ -43,16 +73,37 @@ class HENDao(sp.Contract):
         # Everyone voted yes, execute the buy
         sp.if sp.len(self.data.buyMap[params.swap_id]) == sp.len(self.data.owners):
             self.buy_nft(params.swap_id)
-            # The contract is locked once the first buy is executed
-            # TODO, should the lock happen at a separate step?
-            self.data.locked = True
+    
+    @sp.entry_point
+    def undo_vote_buy(self):
+        pass
+    
+    @sp.entry_point
+    def propose_sell(self):
+        pass
+    
+    @sp.entry_point
+    def vote_sell(self):
+        pass
+    
+    @sp.entry_point
+    def undo_vote_sell(self):
+        pass
+    
+    @sp.entry_point
+    def vote_cancel_sell(self):
+        pass
+    
+    @sp.entry_point
+    def undo_vote_cancel_sell(self):
+        pass
 
 if "templates" not in __name__:
     @sp.add_test(name = "Test_Deposit")
     def test():
         c1 = HENDao([sp.address("tz1owner1"), sp.address("tz1owner2")])
         scenario = sp.test_scenario()
-        scenario.h1("Store Value")
+        scenario.h1("Test Deposits")
         scenario += c1
         admin = sp.address("tz1owner1")
         user2 = sp.address("tz1owner2")
@@ -62,9 +113,21 @@ if "templates" not in __name__:
         c1.deposit().run(sender=admin, amount= sp.mutez(5))
         scenario.verify(c1.data.equity[admin] == sp.mutez(15))
         c1.deposit().run(valid=False, sender=hacker, amount=sp.mutez(10))
+    
+    @sp.add_test(name = "Test_Buy")
+    def test():
+        c1 = HENDao([sp.address("tz1owner1"), sp.address("tz1owner2")])
+        scenario = sp.test_scenario()
+        scenario.h1("Test Buy")
+        scenario += c1
+        admin = sp.address("tz1owner1")
+        user2 = sp.address("tz1owner2")
+
+        scenario.h2("Buying disabled when locked")
+        c1.vote_buy(swap_id=123).run(valid=False, sender=admin)
         
-        c1.propose_buy(swap_id=123).run(sender=admin)
-        c1.propose_buy(swap_id=123).run(sender=user2)
+        scenario.h2("Buying enabled when unlocked")
+        # TODO write this test
 
     # TODO Add the initial addresses here when deploying contract
     sp.add_compilation_target("henDao", HENDao([]))
