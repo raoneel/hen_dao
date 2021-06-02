@@ -20,14 +20,14 @@ class HENDao(sp.Contract):
             numOwners=sp.len(initOwners),
             locked=False,
             closed=False,
-            lock_votes=sp.set(),
-            close_votes=sp.set(),
+            lock_votes=sp.set([], sp.TAddress),
+            close_votes=sp.set([], sp.TAddress),
             total_contributed=sp.mutez(0),
             balance_at_close=sp.mutez(0),
-            equity=sp.big_map({}),
+            equity=sp.big_map({}, sp.TAddress, sp.TMutez),
             buy_proposals=sp.big_map({}, sp.TNat, sp.TRecord(votes=sp.TSet(sp.TAddress), passed=sp.TBool)),
             swap_proposals=sp.big_map({}),
-            cancel_swap_proposals=sp.big_map({}),
+            cancel_swap_proposals=sp.big_map({}, sp.TNat, sp.TRecord(votes=sp.TSet(sp.TAddress), passed=sp.TBool)),
             swap_proposal_id=0,
             did_withdraw=sp.set([], sp.TAddress),
             hen_address = sp.address("KT1Hkg5qeNhfwpKW4fXvq7HGZB9z2EnmCCA9")
@@ -38,8 +38,11 @@ class HENDao(sp.Contract):
     @sp.entry_point
     def vote_lock(self):
         # If contract is already locked, then fail.
-        sp.verify(~self.data.locked & self.data.owners.contains(sp.sender))
-        
+        sp.verify(
+            ~self.data.locked &
+            self.data.owners.contains(sp.sender)
+        )
+
         self.data.lock_votes.add(sp.sender)
 
         # If everyone voted, then set Locked to True,
@@ -74,8 +77,11 @@ class HENDao(sp.Contract):
     
     @sp.entry_point
     def deposit(self):
-        sp.verify(self.data.owners.contains(sp.sender) & ~self.data.locked)
-        
+        sp.verify(
+            self.data.owners.contains(sp.sender) &
+            ~self.data.locked
+        )
+
         # Initialize equity or add to existing
         sp.if self.data.equity.contains(sp.sender):
             self.data.equity[sp.sender] += sp.amount
@@ -90,7 +96,7 @@ class HENDao(sp.Contract):
         sp.verify(
             ~self.data.did_withdraw.contains(sp.sender) &
             self.data.owners.contains(sp.sender) &
-            self.data.locked # Must be locked before you can withdraw
+            self.data.closed # Must be closed before you can withdraw
         )
 
         # Calculate your split of the balance based on your equity
@@ -102,6 +108,7 @@ class HENDao(sp.Contract):
 
         # Send to caller
         sp.send(sp.sender, amount_to_send)
+        self.data.did_withdraw.add(sp.sender)
     
     # Vote for a specific "swap" on HEN
     # A swap is an objkt that is being sold at a specific price
@@ -310,6 +317,9 @@ if "templates" not in __name__:
         # Second user withdraws
         c1.withdraw().run(sender=user1)
         scenario.verify(c1.balance == sp.mutez(120))
+        
+        # Second user can't withdraw twice
+        c1.withdraw().run(sender=user1, valid=False)
 
         # First user withdraws
         c1.withdraw().run(sender=user2)
@@ -402,4 +412,4 @@ if "templates" not in __name__:
         scenario.verify(c1.data.swap_proposals[1].passed == True)
 
     # TODO Add the initial addresses here when deploying contract
-    sp.add_compilation_target("henDao", HENDao([]))
+    sp.add_compilation_target("henDao", HENDao([sp.address("tz1U6aFc7sZ3dfG5HfdWYmUFRbPw5A1FU3kX")]))
