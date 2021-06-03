@@ -35,15 +35,19 @@ class HENDao(sp.Contract):
 
     # Vote to lock the contract
     # Once everyone votes, then self.data.locked = True, deposits are disabled
+    # Pass in true to vote, false to undo vote.
     @sp.entry_point
-    def vote_lock(self):
+    def vote_lock(self, vote):
         # If contract is already locked, then fail.
         sp.verify(
             ~self.data.locked &
             self.data.owners.contains(sp.sender)
         )
-
-        self.data.lock_votes.add(sp.sender)
+        
+        sp.if vote:
+            self.data.lock_votes.add(sp.sender)
+        sp.else:
+            self.data.lock_votes.remove(sp.sender)
 
         # If everyone voted, then set Locked to True,
         # record the state of equity, and reset vo
@@ -54,14 +58,17 @@ class HENDao(sp.Contract):
     # One closed, you can never use this contract for purchasing again
     # Unsold NFTs will be permanently locked into this contract
     @sp.entry_point
-    def vote_close(self):
+    def vote_close(self, vote):
         sp.verify(
             ~self.data.closed & # Must not be closed
             self.data.locked & # And must be locked already
             self.data.owners.contains(sp.sender) # Must be owner
         )
 
-        self.data.close_votes.add(sp.sender)
+        sp.if vote:
+            self.data.close_votes.add(sp.sender)
+        sp.else:
+            self.data.close_votes.remove(sp.sender)
 
         # If everyone voted, then set closed to True,
         sp.if sp.len(self.data.close_votes) == self.data.numOwners:
@@ -165,7 +172,7 @@ class HENDao(sp.Contract):
             ~self.data.closed
         )
 
-        self.data.swap_proposals[self.data.swap_proposal_id] = sp.record(objkt_amount=objkt_amount, objkt_id=objkt_id, xtz_per_objkt=xtz_per_objkt, votes=sp.set([sp.sender], sp.TAddress), passed=False, sold=False)
+        self.data.swap_proposals[self.data.swap_proposal_id] = sp.record(objkt_amount=objkt_amount, objkt_id=objkt_id, xtz_per_objkt=xtz_per_objkt, votes=sp.set([], sp.TAddress), passed=False)
 
         # Increment the proposal ID
         self.data.swap_proposal_id += 1
@@ -293,8 +300,8 @@ if "templates" not in __name__:
         scenario.verify(c1.data.total_contributed == sp.mutez(60))
         
         # Fund is locked
-        c1.vote_lock().run(sender=user1)
-        c1.vote_lock().run(sender=user2)
+        c1.vote_lock(True).run(sender=user1)
+        c1.vote_lock(True).run(sender=user2)
         
         # Deposits should be disabled
         c1.deposit().run(sender=user1, amount= sp.mutez(10), valid=False)
@@ -306,27 +313,30 @@ if "templates" not in __name__:
         scenario.verify(c1.balance == sp.mutez(160))
         
         # Fund is closed
-        c1.vote_close().run(sender=user1)
-        c1.vote_close().run(sender=user2)
+        c1.vote_close(True).run(sender=user1)
+        c1.vote_close(True).run(sender=user2)
         
         scenario.verify(c1.data.balance_at_close == sp.mutez(160))
         
         # user1 has equity 15/60 = 25%
         # user2 has equity 45/60 = 75%;
-        
-        # Second user withdraws
+        # Total balance after sale is 160
+        # user1 owns 0.25 * 160 = 40
+        # user2 owns 0.75 * 160 = 120
+
+        # user1 withdraws
         c1.withdraw().run(sender=user1)
         scenario.verify(c1.balance == sp.mutez(120))
         
-        # Second user can't withdraw twice
+        # user1 cant withdraw twice
         c1.withdraw().run(sender=user1, valid=False)
 
-        # First user withdraws
+        # user2 withdraws
         c1.withdraw().run(sender=user2)
         scenario.verify(c1.balance == sp.mutez(0))
         
     
-    @sp.add_test(name = "Test_Buy")
+    @sp.add_test(name = "test_buy")
     def test():
         c1 = HENDao([sp.address("tz1owner1"), sp.address("tz1owner2")])
         scenario = sp.test_scenario()
@@ -339,8 +349,8 @@ if "templates" not in __name__:
         c1.vote_buy(swap_id=sp.nat(123), price=sp.mutez(0)).run(valid=False, sender=user1)
         
         scenario.h2("Buying enabled when unlocked")
-        c1.vote_lock().run(sender=user1)
-        c1.vote_lock().run(sender=user2)
+        c1.vote_lock(True).run(sender=user1)
+        c1.vote_lock(True).run(sender=user2)
         
         c1.vote_buy(swap_id=sp.nat(123), price=sp.mutez(0)).run(sender=user1)
         
@@ -358,7 +368,7 @@ if "templates" not in __name__:
         scenario.verify(c1.data.buy_proposals[456].votes.contains(user1) == False)
 
 
-    @sp.add_test(name = "Test_Lock")
+    @sp.add_test(name = "test_lock_and_close")
     def test():
         c1 = HENDao([sp.address("tz1owner1"), sp.address("tz1owner2")])
         scenario = sp.test_scenario()
@@ -371,15 +381,35 @@ if "templates" not in __name__:
         scenario.verify(c1.data.locked == False)
 
         scenario.h2("Users can call lock")
-        c1.vote_lock().run(sender=user1)
+        c1.vote_lock(True).run(sender=user1)
+        
+        # Undo and redo lock
+        c1.vote_lock(False).run(sender=user1)
+        scenario.verify(~c1.data.lock_votes.contains(user1))
+        c1.vote_lock(True).run(sender=user1)
+        scenario.verify(c1.data.lock_votes.contains(user1))
 
         scenario.h2("Contract is unlocked when everyone locks")
-        c1.vote_lock().run(sender=user2)
+        c1.vote_lock(True).run(sender=user2)
         scenario.verify(c1.data.locked == True)
+        
         # Still should stay closed
         scenario.verify(c1.data.closed == False)
+        
+        # Vote for close
+        c1.vote_close(True).run(sender=user1)
+        
+        # Undo and redo
+        c1.vote_close(False).run(sender=user1)
+        scenario.verify(~c1.data.close_votes.contains(user1))
+        c1.vote_close(True).run(sender=user1)
+        scenario.verify(c1.data.close_votes.contains(user1))
+        
+        # All users vote for close
+        c1.vote_close(True).run(sender=user2)
+        scenario.verify(c1.data.closed == True)
     
-    @sp.add_test(name = "Test_Swap")
+    @sp.add_test(name = "test_swap")
     def test():
         c1 = HENDao([sp.address("tz1owner1"), sp.address("tz1owner2")])
         scenario = sp.test_scenario()
@@ -389,17 +419,27 @@ if "templates" not in __name__:
         user2 = sp.address("tz1owner2")
 
         scenario.h2("Users can call propose swap")
-        c1.vote_lock().run(sender=user1)
-        c1.vote_lock().run(sender=user2)
+        c1.vote_lock(True).run(sender=user1)
+        c1.vote_lock(True).run(sender=user2)
         c1.propose_swap(objkt_amount=sp.nat(1), objkt_id=sp.nat(123), xtz_per_objkt=sp.mutez(10000)).run(sender=user1)
         c1.propose_swap(objkt_amount=sp.nat(1), objkt_id=sp.nat(456), xtz_per_objkt=sp.mutez(100)).run(sender=user2)
         scenario.verify(c1.data.swap_proposals[0].passed == False)
         scenario.verify(c1.data.swap_proposals[1].passed == False)
         
+        # Undo votes
+        c1.vote_swap(0).run(sender=user1)
+        scenario.verify(c1.data.swap_proposals[0].votes.contains(user1))
+        c1.undo_vote_swap(0).run(sender=user1)
+        scenario.verify(~c1.data.swap_proposals[0].votes.contains(user1))
+        
+        
         scenario.h2("All votes for a swap")
         # Vote to pass the proposals
+        c1.vote_swap(0).run(sender=user1)
         c1.vote_swap(0).run(sender=user2)
+        
         c1.vote_swap(1).run(sender=user1)
+        c1.vote_swap(1).run(sender=user2)
         
         # Test double vote fails
         c1.vote_swap(0).run(sender=user2, valid=False)
@@ -410,6 +450,9 @@ if "templates" not in __name__:
         # Verify that proposal is passed
         scenario.verify(c1.data.swap_proposals[0].passed == True)
         scenario.verify(c1.data.swap_proposals[1].passed == True)
+        
+        # Can't undo after passed
+        c1.undo_vote_swap(0).run(sender=user1, valid=False)
 
     # TODO Add the initial addresses here when deploying contract
     sp.add_compilation_target("henDao", HENDao([sp.address("tz1U6aFc7sZ3dfG5HfdWYmUFRbPw5A1FU3kX")]))
