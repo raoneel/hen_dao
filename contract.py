@@ -293,14 +293,14 @@ class HENDao(sp.Contract):
         sp.transfer(swap_id, sp.mutez(0), c)
 
 if "templates" not in __name__:
-    @sp.add_test(name = "test_deposit_and_withdraw")
+    @sp.add_test(name = "test_full_flow")
     def test():
         c1 = HENDao([sp.address("tz1owner1"), sp.address("tz1owner2")])
         stub = HENStubTester()
         stub.set_initial_balance(sp.mutez(10000))
         
         scenario = sp.test_scenario()
-        scenario.h1("Test Deposits")
+        scenario.h1("Full flow test")
         scenario += c1
         scenario += stub
     
@@ -329,6 +329,9 @@ if "templates" not in __name__:
         scenario.verify(c1.data.equity[user2] == sp.mutez(45))
         scenario.verify(c1.data.total_contributed == sp.mutez(60))
         
+        # First user can't withdraw more than they put in
+        c1.withdraw(sp.mutez(50)).run(valid=False)
+        
         # Fund is locked
         c1.vote_lock(True).run(sender=user1)
         c1.vote_lock(True).run(sender=user2)
@@ -356,14 +359,14 @@ if "templates" not in __name__:
         c1.liquidate().run(sender=user1)
         scenario.verify(c1.balance == sp.mutez(120))
         
-        # Can't liquidate if you have no funds left
+        # Can't liquidate again if you have no funds left
         c1.liquidate().run(sender=user1, valid=False)
 
         # user2 withdraws
         c1.liquidate().run(sender=user2)
         scenario.verify(c1.balance == sp.mutez(0))
         
-        # New purchase is made
+        # New sale is made
         stub.simulate_purchase(dest=c1.address, amount=sp.mutez(100)).run(sender=user1)
         scenario.verify(c1.balance == sp.mutez(100))
         c1.liquidate().run(sender=user1)
