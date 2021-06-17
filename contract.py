@@ -133,8 +133,12 @@ class HENDao(sp.Contract):
         ) -  self.data.liquidated_ledger.get(sp.sender, sp.mutez(0))
 
         sp.verify(amount_to_send.value > sp.mutez(0))
+        
+        sp.if self.data.liquidated_ledger.contains(sp.sender):
+            self.data.liquidated_ledger[sp.sender] += amount_to_send.value
+        sp.else:
+            self.data.liquidated_ledger[sp.sender] = amount_to_send.value
 
-        self.data.liquidated_ledger[sp.sender] = amount_to_send.value
         self.data.total_liquidated += amount_to_send.value
 
         # Send to caller
@@ -351,8 +355,27 @@ if "templates" not in __name__:
         # user1 withdraws
         c1.liquidate().run(sender=user1)
         scenario.verify(c1.balance == sp.mutez(120))
+        
+        # Can't liquidate if you have no funds left
+        c1.liquidate().run(sender=user1, valid=False)
 
         # user2 withdraws
+        c1.liquidate().run(sender=user2)
+        scenario.verify(c1.balance == sp.mutez(0))
+        
+        # New purchase is made
+        stub.simulate_purchase(dest=c1.address, amount=sp.mutez(100)).run(sender=user1)
+        scenario.verify(c1.balance == sp.mutez(100))
+        c1.liquidate().run(sender=user1)
+        scenario.verify(c1.balance == sp.mutez(75))
+        
+        # Another purchase is made before user2 withdrew from previous one
+        stub.simulate_purchase(dest=c1.address, amount=sp.mutez(100)).run(sender=user1)
+        scenario.verify(c1.balance == sp.mutez(175))
+        # User1 doesn't own 25% of above, user1 should only be able to withdraw an additional 25
+        c1.liquidate().run(sender=user1)
+        scenario.verify(c1.balance == sp.mutez(150))
+        
         c1.liquidate().run(sender=user2)
         scenario.verify(c1.balance == sp.mutez(0))
         
