@@ -1,8 +1,7 @@
 import smartpy as sp
 
-# buy_proposals swapId -> {[address]: boolean}
-# Where swapId is a unique swap on HEN
-# still needs a lot of work defining data structures etc.
+# This class is only used in tests to emulate the HEN minter contract
+# TODO stub out swap, collect, cancel_swap
 class HENStubTester(sp.Contract):
     def __init__(self):
         self.init()
@@ -23,13 +22,13 @@ class HENDao(sp.Contract):
             lock_votes=sp.set([], sp.TAddress),
             close_votes=sp.set([], sp.TAddress),
             total_contributed=sp.mutez(0),
-            balance_at_close=sp.mutez(0),
+            total_liquidated=sp.mutez(0),
+            liquidated_ledger=sp.big_map({}, sp.TAddress, sp.TMutez),
             equity=sp.big_map({}, sp.TAddress, sp.TMutez),
             buy_proposals=sp.big_map({}, sp.TNat, sp.TRecord(votes=sp.TSet(sp.TAddress), passed=sp.TBool)),
             swap_proposals=sp.big_map({}),
             cancel_swap_proposals=sp.big_map({}, sp.TNat, sp.TRecord(votes=sp.TSet(sp.TAddress), passed=sp.TBool)),
             swap_proposal_id=0,
-            did_withdraw=sp.set([], sp.TAddress),
             hen_address = sp.address("KT1Hkg5qeNhfwpKW4fXvq7HGZB9z2EnmCCA9")
         )
 
@@ -56,7 +55,8 @@ class HENDao(sp.Contract):
     
     # Vote to close the contract
     # One closed, you can never use this contract for purchasing again
-    # Unsold NFTs will be permanently locked into this contract
+    # NFTs can still be sold, and people can withdraw.
+    # This is so that equity in each NFT will remain constant.
     @sp.entry_point
     def vote_close(self, vote):
         sp.verify(
@@ -73,15 +73,13 @@ class HENDao(sp.Contract):
         # If everyone voted, then set closed to True,
         sp.if sp.len(self.data.close_votes) == self.data.numOwners:
             self.data.closed = True
-
-            # Lock in the final balance, used for calculating withdrawals
-            self.data.balance_at_close = sp.balance
     
     # Default entrypoint, this will be called when money is transferred to the account 
     @sp.entry_point
     def default(self):
         pass
     
+    # Deposit money in the unlocked stage
     @sp.entry_point
     def deposit(self):
         sp.verify(
@@ -97,31 +95,57 @@ class HENDao(sp.Contract):
         
         self.data.total_contributed += sp.amount
     
+    # Withdraw money in the unlocked stage
+    @sp.entry_point
+    def withdraw(self, amount):
+        sp.set_type(amount, sp.TMutez)
+        
+        # Verify that you are an owner and
+        # that you only can withdraw as much as you contributed.
+        sp.verify(
+            self.data.owners.contains(sp.sender) &
+            (self.data.equity[sp.sender] >= amount)
+        )
+        
+        self.data.equity[sp.sender] -= amount
+        self.data.total_contributed -= amount
+        sp.send(sp.sender, amount)
+    
     # Withdraw your money and then record that you have withdrew
     @sp.entry_point
-    def withdraw(self):
+    def liquidate(self):
         sp.verify(
-            ~self.data.did_withdraw.contains(sp.sender) &
             self.data.owners.contains(sp.sender) &
             self.data.closed # Must be closed before you can withdraw
         )
+        
+        # This should equal the sum of all money ever contributed to contract
+        # Via either people or sales.
+        real_total = sp.balance + self.data.total_liquidated
 
         # Calculate your split of the balance based on your equity
-        amount_to_send = sp.split_tokens(
+        
+        amount_to_send = sp.local("amount_to_send", sp.mutez(0))
+        amount_to_send.value = sp.split_tokens(
             self.data.equity[sp.sender],
-            sp.utils.mutez_to_nat(self.data.balance_at_close),
+            sp.utils.mutez_to_nat(real_total),
             sp.utils.mutez_to_nat(self.data.total_contributed)
-        )
+        ) -  self.data.liquidated_ledger.get(sp.sender, sp.mutez(0))
+
+        sp.verify(amount_to_send.value > sp.mutez(0))
+
+        self.data.liquidated_ledger[sp.sender] = amount_to_send.value
+        self.data.total_liquidated += amount_to_send.value
 
         # Send to caller
-        sp.send(sp.sender, amount_to_send)
-        self.data.did_withdraw.add(sp.sender)
+        sp.send(sp.sender, amount_to_send.value)
     
     # Vote for a specific "swap" on HEN
     # A swap is an objkt that is being sold at a specific price
     @sp.entry_point
-    def vote_buy(self, swap_id, price):
+    def vote_buy(self, swap_id, objkt_amount, price):
         sp.set_type(swap_id, sp.TNat)
+        sp.set_type(objkt_amount, sp.TNat)
         sp.set_type(price, sp.TMutez)
         
         sp.verify(
@@ -142,7 +166,7 @@ class HENDao(sp.Contract):
 
         # Everyone voted yes, execute the buy
         sp.if sp.len(self.data.buy_proposals[swap_id].votes) == sp.len(self.data.owners):
-            self.hen_collect(swap_id, price)
+            self.hen_collect(swap_id, objkt_amount, price)
             self.data.buy_proposals[swap_id].passed = True
 
     # Undo a vote for a swap
@@ -168,8 +192,7 @@ class HENDao(sp.Contract):
 
         sp.verify(
             self.data.owners.contains(sp.sender) &
-            self.data.locked &
-            ~self.data.closed
+            self.data.locked
         )
 
         self.data.swap_proposals[self.data.swap_proposal_id] = sp.record(objkt_amount=objkt_amount, objkt_id=objkt_id, xtz_per_objkt=xtz_per_objkt, votes=sp.set([], sp.TAddress), passed=False)
@@ -186,7 +209,6 @@ class HENDao(sp.Contract):
         sp.verify(
             self.data.owners.contains(sp.sender) &
             self.data.locked &
-            ~self.data.closed &
             self.data.swap_proposals.contains(swap_proposal_id) &
             ~self.data.swap_proposals[swap_proposal_id].passed
         )
@@ -205,7 +227,6 @@ class HENDao(sp.Contract):
         sp.verify(
             self.data.owners.contains(sp.sender) &
             self.data.locked &
-            ~self.data.closed &
             self.data.swap_proposals.contains(swap_proposal_id) &
             ~self.data.swap_proposals[swap_proposal_id].passed
         )
@@ -220,7 +241,6 @@ class HENDao(sp.Contract):
         sp.verify(
             self.data.owners.contains(sp.sender) &
             self.data.locked &
-            ~self.data.closed &
             self.data.cancel_swap_proposals.contains(swap_id) &
             ~self.data.cancel_swap_proposals[swap_id].passed
         )
@@ -241,7 +261,6 @@ class HENDao(sp.Contract):
         sp.verify(
             self.data.owners.contains(sp.sender) &
             self.data.locked &
-            ~self.data.closed &
             self.data.cancel_swap_proposals.contains(swap_id) &
             ~self.data.cancel_swap_proposals[swap_id].passed
         )
@@ -249,9 +268,9 @@ class HENDao(sp.Contract):
         self.data.cancel_swap_proposals[swap_id].votes.remove(sp.sender)
 
     ### HEN Contract Functions ###    
-    def hen_collect(self, swap_id, price):
+    def hen_collect(self, swap_id, objkt_amount, price):
         c = sp.contract(sp.TPair(sp.TNat, sp.TNat), self.data.hen_address, entry_point = "collect").open_some()
-        sp.transfer(sp.pair(1, swap_id), price, c)
+        sp.transfer(sp.pair(objkt_amount, swap_id), price, c)
 
     def hen_swap(self, swap_proposal_id):
         # Check that the swap exists
@@ -291,6 +310,13 @@ if "templates" not in __name__:
         scenario.verify(c1.data.equity[user1] == sp.mutez(15))
         scenario.verify(c1.data.total_contributed == sp.mutez(15))
         
+        # Test withdraw
+        c1.withdraw(sp.mutez(5)).run(sender=user1)
+        scenario.verify(c1.data.equity[user1] == sp.mutez(10))
+        scenario.verify(c1.data.total_contributed == sp.mutez(10))
+        c1.deposit().run(sender=user1, amount= sp.mutez(5))
+
+        
         # Hacker should not be able to deposit
         c1.deposit().run(valid=False, sender=hacker, amount=sp.mutez(10))
         
@@ -316,8 +342,6 @@ if "templates" not in __name__:
         c1.vote_close(True).run(sender=user1)
         c1.vote_close(True).run(sender=user2)
         
-        scenario.verify(c1.data.balance_at_close == sp.mutez(160))
-        
         # user1 has equity 15/60 = 25%
         # user2 has equity 45/60 = 75%;
         # Total balance after sale is 160
@@ -325,14 +349,11 @@ if "templates" not in __name__:
         # user2 owns 0.75 * 160 = 120
 
         # user1 withdraws
-        c1.withdraw().run(sender=user1)
+        c1.liquidate().run(sender=user1)
         scenario.verify(c1.balance == sp.mutez(120))
-        
-        # user1 cant withdraw twice
-        c1.withdraw().run(sender=user1, valid=False)
 
         # user2 withdraws
-        c1.withdraw().run(sender=user2)
+        c1.liquidate().run(sender=user2)
         scenario.verify(c1.balance == sp.mutez(0))
         
     
@@ -346,24 +367,24 @@ if "templates" not in __name__:
         user2 = sp.address("tz1owner2")
 
         scenario.h2("Buying disabled when locked")
-        c1.vote_buy(swap_id=sp.nat(123), price=sp.mutez(0)).run(valid=False, sender=user1)
+        c1.vote_buy(swap_id=sp.nat(123), price=sp.mutez(0), objkt_amount=sp.nat(1)).run(valid=False, sender=user1)
         
         scenario.h2("Buying enabled when unlocked")
         c1.vote_lock(True).run(sender=user1)
         c1.vote_lock(True).run(sender=user2)
         
-        c1.vote_buy(swap_id=sp.nat(123), price=sp.mutez(0)).run(sender=user1)
+        c1.vote_buy(swap_id=sp.nat(123), objkt_amount=sp.nat(1), price=sp.mutez(0)).run(sender=user1)
         
         # Proposal should pass
-        c1.vote_buy(swap_id=sp.nat(123), price=sp.mutez(0)).run(sender=user2)
+        c1.vote_buy(swap_id=sp.nat(123), objkt_amount=sp.nat(1), price=sp.mutez(0)).run(sender=user2)
         scenario.verify(c1.data.buy_proposals[123].passed == True)
         
         # Double vote fails
-        c1.vote_buy(swap_id=sp.nat(123), price=sp.mutez(0)).run(sender=user2, valid=False)
-        c1.vote_buy(swap_id=sp.nat(123), price=sp.mutez(0)).run(sender=user1, valid=False)
+        c1.vote_buy(swap_id=sp.nat(123), objkt_amount=sp.nat(1), price=sp.mutez(0)).run(sender=user2, valid=False)
+        c1.vote_buy(swap_id=sp.nat(123), objkt_amount=sp.nat(1), price=sp.mutez(0)).run(sender=user1, valid=False)
 
         # Test undo
-        c1.vote_buy(swap_id=sp.nat(456), price=sp.mutez(5)).run(sender=user1)
+        c1.vote_buy(swap_id=sp.nat(456), objkt_amount=sp.nat(1), price=sp.mutez(5)).run(sender=user1)
         c1.undo_vote_buy(456).run(sender=user1)
         scenario.verify(c1.data.buy_proposals[456].votes.contains(user1) == False)
 
@@ -455,4 +476,4 @@ if "templates" not in __name__:
         c1.undo_vote_swap(0).run(sender=user1, valid=False)
 
     # TODO Add the initial addresses here when deploying contract
-    sp.add_compilation_target("henDao", HENDao([sp.address("tz1U6aFc7sZ3dfG5HfdWYmUFRbPw5A1FU3kX")]))
+    sp.add_compilation_target("henDao", HENDao([]))
