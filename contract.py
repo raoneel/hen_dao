@@ -29,7 +29,10 @@ class HENDao(sp.Contract):
             swap_proposals=sp.big_map({}),
             cancel_swap_proposals=sp.big_map({}, sp.TNat, sp.TRecord(votes=sp.TSet(sp.TAddress), passed=sp.TBool)),
             swap_proposal_id=0,
-            hen_address = sp.address("KT1Hkg5qeNhfwpKW4fXvq7HGZB9z2EnmCCA9")
+            # Used for collect/swap/cancel_swap
+            hen_address = sp.address("KT1HbQepzV1nVGg8QVznG7z4RcHseD5kwqBn"),
+            # Used for update_operators
+            hen_nft_address = sp.address("KT1RJ6PbjHpwc3M5rw5s2Nbmefwbuwbdxton")
         )
 
     # Vote to lock the contract
@@ -147,9 +150,8 @@ class HENDao(sp.Contract):
     # Vote for a specific "swap" on HEN
     # A swap is an objkt that is being sold at a specific price
     @sp.entry_point
-    def vote_buy(self, swap_id, objkt_amount, price):
+    def vote_buy(self, swap_id, price):
         sp.set_type(swap_id, sp.TNat)
-        sp.set_type(objkt_amount, sp.TNat)
         sp.set_type(price, sp.TMutez)
         
         sp.verify(
@@ -170,7 +172,7 @@ class HENDao(sp.Contract):
 
         # Everyone voted yes, execute the buy
         sp.if sp.len(self.data.buy_proposals[swap_id].votes) == sp.len(self.data.owners):
-            self.hen_collect(swap_id, objkt_amount, price)
+            self.hen_collect(swap_id, price)
             self.data.buy_proposals[swap_id].passed = True
 
     # Undo a vote for a swap
@@ -189,17 +191,18 @@ class HENDao(sp.Contract):
 
     # Propose selling an objkt at a certain price point
     @sp.entry_point
-    def propose_swap(self, objkt_amount, objkt_id, xtz_per_objkt):
+    def propose_swap(self, objkt_amount, objkt_id, xtz_per_objkt, creator):
         sp.set_type(objkt_amount, sp.TNat)
         sp.set_type(objkt_id, sp.TNat)
         sp.set_type(xtz_per_objkt, sp.TMutez)
+        sp.set_type(creator, sp.TAddress)
 
         sp.verify(
             self.data.owners.contains(sp.sender) &
             self.data.locked
         )
 
-        self.data.swap_proposals[self.data.swap_proposal_id] = sp.record(objkt_amount=objkt_amount, objkt_id=objkt_id, xtz_per_objkt=xtz_per_objkt, votes=sp.set([], sp.TAddress), passed=False)
+        self.data.swap_proposals[self.data.swap_proposal_id] = sp.record(objkt_amount=objkt_amount, objkt_id=objkt_id, xtz_per_objkt=xtz_per_objkt, votes=sp.set([], sp.TAddress), passed=False, creator=creator)
 
         # Increment the proposal ID
         self.data.swap_proposal_id += 1
@@ -272,9 +275,9 @@ class HENDao(sp.Contract):
         self.data.cancel_swap_proposals[swap_id].votes.remove(sp.sender)
 
     ### HEN Contract Functions ###    
-    def hen_collect(self, swap_id, objkt_amount, price):
-        c = sp.contract(sp.TPair(sp.TNat, sp.TNat), self.data.hen_address, entry_point = "collect").open_some()
-        sp.transfer(sp.pair(objkt_amount, swap_id), price, c)
+    def hen_collect(self, swap_id, price):
+        c = sp.contract(sp.TNat, self.data.hen_address, entry_point = "collect").open_some()
+        sp.transfer(swap_id, price, c)
 
     def hen_swap(self, swap_proposal_id):
         # Check that the swap exists
@@ -283,10 +286,50 @@ class HENDao(sp.Contract):
 
         # Get swap info
         swap_info = self.data.swap_proposals[swap_proposal_id]
-        
+
+        # First, you need to update operators
+        # Example https://tzkt.io/opGfD9TeKG145Rn427t32KVU3fPs74VucUxNLYGxZ7iN5yrPeJ8/11567483
+        t = sp.TRecord(owner=sp.TAddress, operator=sp.TAddress, token_id=sp.TNat)
+        t = t.layout(("owner", ("operator", "token_id")))
+
+        nft_contract = sp.contract(sp.TList(
+            sp.TVariant(
+              add_operator=t,
+              remove_operator=t
+            )
+        ),
+        self.data.hen_nft_address,
+        entry_point="update_operators").open_some()
+
+        sp.transfer(
+            sp.list([sp.variant("add_operator", sp.record(
+                owner=sp.self_address,
+                operator=self.data.hen_address,
+                token_id=swap_info.objkt_id
+            ))]),
+            sp.mutez(0),
+            nft_contract
+        )
+
         # Call into HEN contract
-        c = sp.contract(sp.TPair(sp.TNat, sp.TPair(sp.TNat, sp.TMutez)), self.data.hen_address, entry_point = "swap").open_some()
-        sp.transfer(sp.pair(swap_info.objkt_amount, sp.pair(swap_info.objkt_id, swap_info.xtz_per_objkt)), sp.mutez(0), c)
+        c = sp.contract(
+            sp.TRecord(
+                creator=sp.TAddress,
+                objkt_amount=sp.TNat,
+                objkt_id=sp.TNat,
+                royalties=sp.TNat,
+                xtz_per_objkt=sp.TMutez
+            ), 
+            self.data.hen_address, entry_point = "swap").open_some()
+        sp.transfer(
+            sp.record(
+                creator=swap_info.creator,
+                objkt_amount=swap_info.objkt_amount,
+                objkt_id=swap_info.objkt_id,
+                royalties=100,
+                xtz_per_objkt=swap_info.xtz_per_objkt
+            ),
+            sp.mutez(0), c)
 
     def hen_cancel_swap(self, swap_id):
         c = sp.contract(sp.TNat, self.data.hen_address, entry_point = "cancel_swap").open_some()
@@ -468,8 +511,8 @@ if "templates" not in __name__:
         scenario.h2("Users can call propose swap")
         c1.vote_lock(True).run(sender=user1)
         c1.vote_lock(True).run(sender=user2)
-        c1.propose_swap(objkt_amount=sp.nat(1), objkt_id=sp.nat(123), xtz_per_objkt=sp.mutez(10000)).run(sender=user1)
-        c1.propose_swap(objkt_amount=sp.nat(1), objkt_id=sp.nat(456), xtz_per_objkt=sp.mutez(100)).run(sender=user2)
+        c1.propose_swap(objkt_amount=sp.nat(1), objkt_id=sp.nat(123), xtz_per_objkt=sp.mutez(10000), creator=user2).run(sender=user1)
+        c1.propose_swap(objkt_amount=sp.nat(1), objkt_id=sp.nat(456), xtz_per_objkt=sp.mutez(100), creator=user2).run(sender=user2)
         scenario.verify(c1.data.swap_proposals[0].passed == False)
         scenario.verify(c1.data.swap_proposals[1].passed == False)
         
